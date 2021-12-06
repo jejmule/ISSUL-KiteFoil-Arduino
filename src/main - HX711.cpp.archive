@@ -1,0 +1,140 @@
+//Université de Lausanne - ISSUL
+//Jerome Parent
+//Read 6 HX711 scale and stream data to serial port
+//Using https://github.com/RobTillaart/HX711
+//https://web.archive.org/web/20170711074819/https://www.bluetooth.com/specifications/gatt/services
+
+#include "HX711.h"
+#include <Arduino_LSM9DS1.h>
+#include <ArduinoBLE.h>
+
+//Numbers of active load cells in current design
+#define CELLS 3
+#define GAIN_WEIGHT 1960
+#define V_EXCITATION 5
+
+HX711 sensor[CELLS];
+//Array of data and clock pins
+const uint8_t data_pin[6] = {D2,D4,D6,D8,D10,D12};
+const uint8_t clock_pin[6] = {D3,D5,D7,D9,D11,D13};
+//factory calibration gain of each sensors
+const float gain[6] = {1.14560,1.11850,1.05247,1,1,1};
+
+union {
+  float f;
+  byte b[4];
+} weight;
+
+//GATT custom service : 924c4b43-75b0-48d8-9255-32c4b6e09bee
+BLEService kiteService("924c4b43-75b0-48d8-9255-32c4b6e09bee");
+
+//GATT Characteristic, standard for weight and battery, custom ofr acc, gyro and magnetic field
+BLECharacteristic battChar("2A19",BLERead | BLENotify,1);
+BLECharacteristic weightChar("2A98",BLERead | BLENotify,4*CELLS);
+BLECharacteristic accChar("19498e1a-e5a6-4df2-9bea-0355bd94786a",BLERead | BLENotify,12);
+BLECharacteristic gyroChar("3fd2a1ce-2f24-4c33-b28f-639775d9df43",BLERead | BLENotify,12);
+BLECharacteristic magChar("ed76a912-1a3a-4879-869f-d771c26dbf7f",BLERead | BLENotify,12);
+
+void setup() {
+  // Init serial communication
+  Serial.begin(115200);
+  Serial.println(__FILE__);
+  
+  //Init sensors
+  for(byte i=0; i<CELLS; i++) {
+    //start communication
+    sensor[i].begin(data_pin[i],clock_pin[i]);  
+    while (!sensor[i].is_ready());
+    //convertion factor using load cell factory calibration values
+    //default gain is 128 (+-20mV) and the analog converter is 24 bits
+    float conv = 40/pow(2,24) * GAIN_WEIGHT / (gain[i]*V_EXCITATION);
+    //Set scale and offset according to HX711 library
+    sensor[i].set_scale(1/conv);
+    sensor[i].tare(10);
+  }
+
+  //INIT inertial measurement unit : IMU
+  if (!IMU.begin()) {
+    Serial.println("Failed to initialize IMU!");
+    while (1);
+  }
+
+  //INIT BLE
+  pinMode(LED_BUILTIN, OUTPUT); // initialize the built-in LED pin to indicate when a central is connected
+  // begin initialization
+  if (!BLE.begin()) {
+    Serial.println("starting BLE failed!");
+    while (1);
+  }
+  BLE.setLocalName("KiteBoardSensing");
+  BLE.setAdvertisedService(kiteService); // add the service UUID
+  kiteService.addCharacteristic(weightChar); // add the battery level characteristic
+  kiteService.addCharacteristic(battChar);
+  kiteService.addCharacteristic(accChar);
+  kiteService.addCharacteristic(gyroChar);
+  kiteService.addCharacteristic(magChar);
+  BLE.addService(kiteService); // Add the battery service
+  weight.f=0.0;
+  weightChar.writeValue(weight.b,4); // set initial value for this characteristic
+
+  // start advertising
+  BLE.advertise();
+  Serial.println("Bluetooth device active, waiting for connections...");
+}
+
+void loop() {
+//  //Array of measured values from load cells
+//  float loads[CELLS];
+//  // Read loads and print measurement on serial port
+//  for(byte i=0; i<CELLS; i++) {
+//    //read sensors with offset and scale applied
+//    loads[i] = sensor[i].get_units(1);
+//    //Send to serial port each measurement separated by a tab : compatible with serial plotter
+////    if(i>0) Serial.print("\t");
+////    Serial.print(loads[i]);
+//  }
+  //new data set
+//  Serial.println();
+
+  //read and print magnetic field
+  float x, y, z;
+  if (IMU.magneticFieldAvailable()) {
+    IMU.readMagneticField(x, y, z);
+//    Serial.print(x);
+//    Serial.print('\t');
+//    Serial.print(y);
+//    Serial.print('\t');
+//    Serial.println(z);
+  }
+
+  // wait for a BLE central
+  BLEDevice central = BLE.central();
+
+  // if a central is connected to the peripheral:
+  if (central) {
+    Serial.print("Connected to central: ");
+    // print the central's BT address:
+    Serial.println(central.address());
+    // turn on the LED to indicate the connection:
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    // check the battery level every 200ms
+    // while the central is connected:
+    while (central.connected()) {
+      //Array of measured values from load cells
+      float loads[CELLS];
+      // Read loads and print measurement on serial port
+      for(byte i=0; i<CELLS; i++) {
+        //read sensors with offset and scale applied
+        loads[i] = sensor[i].get_units(1);
+      }
+      weight.f = loads[0];
+      weightChar.writeValue(weight.b,4);
+      Serial.println(weight.f);
+    }
+    // when the central disconnects, turn off the LED:
+    digitalWrite(LED_BUILTIN, LOW);
+    Serial.print("Disconnected from central: ");
+    Serial.println(central.address());
+  }
+}
